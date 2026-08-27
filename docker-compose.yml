@@ -1,0 +1,29 @@
+services:
+  grafana:
+    image: grafana/grafana-oss:11.4.0
+    ports:
+      - "3001:3000" # 3001 on host to avoid clashing with the Next.js dev server on 3000
+    environment:
+      - GF_SERVER_DOMAIN=grafana
+      - GF_SERVER_ROOT_URL=http://grafana:3000/
+      - GF_RENDERING_SERVER_URL=http://renderer:8081/render
+      - GF_RENDERING_CALLBACK_URL=http://grafana:3000/
+      - GF_RENDERING_RENDERER_TOKEN=${RENDERER_TOKEN:-changeme-renderer-token}
+      - GF_LOG_FILTERS=rendering:debug
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    depends_on: [renderer]
+
+  renderer:
+    image: grafana/grafana-image-renderer:latest
+    ports:
+      - "8081:8081"
+    environment:
+      # NOTE: the grafana-image-renderer container reads AUTH_TOKEN (not
+      # RENDERING_TOKEN, despite the name of Grafana's own env var below) —
+      # this must match GF_RENDERING_RENDERER_TOKEN on the grafana service.
+      - AUTH_TOKEN=${RENDERER_TOKEN:-changeme-renderer-token}
+
+volumes:
+  grafana-data:

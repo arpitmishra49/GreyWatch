@@ -1,0 +1,86 @@
+// Prisma schema — see context.md "Data Model" for the rationale behind each field.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String        @id @default(cuid())
+  username    String        @unique
+  // Not in context.md's original schema — added because "notify creator on
+  // breach" and "poll/API failure notifies the creator" both DM by Slack
+  // member ID (see context.md's Slack Integration Details), and nothing else
+  // in the pilot's username-only login captures it.
+  slackUserId String
+  createdAt   DateTime      @default(now())
+  tasks       MonitorTask[]
+}
+
+model Site {
+  id           String        @id @default(cuid())
+  name         String        @unique // "Site A"
+  dashboardUid String // Grafana dashboard UID
+  tasks        MonitorTask[]
+}
+
+model MonitorTask {
+  id              String   @id @default(cuid())
+  siteId          String
+  pollIntervalMin Int // preset minutes, e.g. 5 — shared by every metric on this task
+  cooldownMin     Int // preset minutes, e.g. 15 — shared by every metric on this task
+  durationMin     Int // preset minutes, e.g. 240 (4h)
+  status          String   @default("active") // active | stopped | expired
+  createdById     String
+  notifyCreator   Boolean  @default(false) // also DM the creator on breach, in addition to L3
+  startedAt       DateTime @default(now())
+  expiresAt       DateTime
+  nextCheckAt     DateTime // worker reads this to know what's due
+
+  site      Site         @relation(fields: [siteId], references: [id])
+  createdBy User         @relation(fields: [createdById], references: [id])
+  metrics   TaskMetric[]
+
+  @@index([status, nextCheckAt])
+}
+
+// One watched panel within a task. A task can watch several panels on the
+// same site at once (e.g. Rack-to-Rack Time AND Orderline Throughput) —
+// each gets its own condition and is polled/evaluated/alerted independently,
+// even though they share the parent task's poll interval and cooldown.
+model TaskMetric {
+  id              String    @id @default(cuid())
+  taskId          String
+  panelId         Int // Grafana panel ID
+  panelTitle      String // cached at creation time, for display
+  operator        String // "gt" | "lt" | "gte" | "lte" | "eq"
+  threshold       Float
+  lastStatus      String? // "ok" | "breached" | "error" — last known state
+  lastAlertAt     DateTime? // used to enforce cooldown, per metric
+  threadTs        String? // L3 channel Slack thread_ts, per metric
+  creatorThreadTs String? // creator DM Slack thread_ts, per metric
+
+  task   MonitorTask @relation(fields: [taskId], references: [id])
+  events TaskEvent[]
+
+  @@index([taskId])
+}
+
+model TaskEvent {
+  id            String   @id @default(cuid())
+  metricId      String
+  checkedAt     DateTime @default(now())
+  success       Boolean // false = Grafana call failed
+  errorMessage  String?
+  capturedValue Float?
+  breached      Boolean?
+  alerted       Boolean  @default(false) // true if this check resulted in a Slack post
+
+  metric TaskMetric @relation(fields: [metricId], references: [id])
+
+  @@index([metricId, checkedAt])
+}

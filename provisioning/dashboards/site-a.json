@@ -1,0 +1,81 @@
+{
+  "uid": "site-a",
+  "title": "Site A - Fulfillment Metrics",
+  "tags": ["sandbox", "site-a"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Rack to Rack Time - Pick (Seconds)",
+      "type": "timeseries",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "min": 0 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "scenarioId": "random_walk",
+          "seriesCount": 1,
+          "min": 10,
+          "max": 30,
+          "startValue": 20,
+          "spread": 3,
+          "noise": 2
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Orderline Throughput (Lines/Hr)",
+      "type": "timeseries",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "scenarioId": "random_walk",
+          "seriesCount": 1,
+          "min": 350,
+          "max": 650,
+          "startValue": 500,
+          "spread": 40,
+          "noise": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Per-Unit OWT (ms)",
+      "type": "timeseries",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "min": 0 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "scenarioId": "random_walk",
+          "seriesCount": 1,
+          "min": 200,
+          "max": 800,
+          "startValue": 400,
+          "spread": 60,
+          "noise": 30
+        }
+      ]
+    }
+  ]
+}

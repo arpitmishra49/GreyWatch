@@ -6,12 +6,25 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "worker": "tsx watch worker/index.ts",
+    "db:seed": "tsx prisma/seed.ts",
+    "test:grafana": "tsx scripts/test-grafana.ts",
+    "test:slack": "tsx scripts/test-slack.ts"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "@slack/web-api": "^8.0.0",
+    "dotenv": "^17.4.2",
     "next": "16.3.2",
+    "prisma": "^6.19.3",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "tsx": "^4.23.12",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^20",
