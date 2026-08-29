@@ -9,9 +9,13 @@ interface MetricPickerProps {
   panels: GrafanaPanel[];
   selected: Record<number, SelectedMetric>;
   onChange: (next: Record<number, SelectedMetric>) => void;
+  // Slack tasks always alert on a condition, so a threshold is required.
+  // Email reports can just state a value with no condition at all — set
+  // this false to make the threshold field optional (e.g. for reports).
+  thresholdRequired?: boolean;
 }
 
-export function MetricPicker({ panels, selected, onChange }: MetricPickerProps) {
+export function MetricPicker({ panels, selected, onChange, thresholdRequired = true }: MetricPickerProps) {
   function toggle(panelId: number) {
     const next = { ...selected };
     if (next[panelId]) {
@@ -58,7 +62,9 @@ export function MetricPicker({ panels, selected, onChange }: MetricPickerProps) 
                   </select>
                 </div>
                 <div className="field">
-                  <label htmlFor={`threshold-${panel.id}`}>Threshold</label>
+                  <label htmlFor={`threshold-${panel.id}`}>
+                    Threshold{!thresholdRequired && " (optional)"}
+                  </label>
                   <input
                     id={`threshold-${panel.id}`}
                     type="number"
@@ -66,7 +72,7 @@ export function MetricPicker({ panels, selected, onChange }: MetricPickerProps) 
                     value={metric.threshold}
                     onChange={(e) => updateMetric(panel.id, { threshold: e.target.value })}
                     placeholder="e.g. 20"
-                    required
+                    required={thresholdRequired}
                   />
                 </div>
               </div>

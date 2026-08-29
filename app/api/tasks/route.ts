@@ -13,11 +13,12 @@ const metricSchema = z.object({
 
 const createTaskSchema = z.object({
   siteId: z.string().min(1),
+  dashboardUid: z.string().min(1),
   metrics: z.array(metricSchema).min(1, "Pick at least one panel to watch"),
   pollIntervalMin: z.number().int().refine((v) => POLL_INTERVAL_PRESETS_MIN.includes(v)),
   cooldownMin: z.number().int().refine((v) => COOLDOWN_PRESETS_MIN.includes(v)),
   durationMin: z.number().int().refine((v) => DURATION_PRESETS_MIN.includes(v)),
-  notifyCreator: z.boolean(),
+  recipientSlackIds: z.array(z.string().trim().min(1)).default([]),
 });
 
 export async function GET() {
@@ -26,6 +27,7 @@ export async function GET() {
       site: true,
       createdBy: { select: { username: true } },
       metrics: { orderBy: { panelTitle: "asc" } },
+      recipients: true,
     },
     orderBy: { startedAt: "desc" },
     take: 100,
@@ -49,7 +51,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Site not found" }, { status: 404 });
   }
 
-  const { metrics, ...taskFields } = parsed.data;
+  const { metrics, recipientSlackIds, ...taskFields } = parsed.data;
   const now = new Date();
   const task = await prisma.monitorTask.create({
     data: {
@@ -59,8 +61,9 @@ export async function POST(request: Request) {
       expiresAt: new Date(now.getTime() + taskFields.durationMin * 60_000),
       nextCheckAt: now,
       metrics: { create: metrics },
+      recipients: { create: recipientSlackIds.map((slackUserId) => ({ slackUserId })) },
     },
-    include: { metrics: true },
+    include: { metrics: true, recipients: true },
   });
 
   return NextResponse.json(task, { status: 201 });

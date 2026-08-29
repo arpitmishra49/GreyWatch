@@ -10,16 +10,19 @@
     "worker": "tsx watch worker/index.ts",
     "db:seed": "tsx prisma/seed.ts",
     "test:grafana": "tsx scripts/test-grafana.ts",
-    "test:slack": "tsx scripts/test-slack.ts"
+    "test:slack": "tsx scripts/test-slack.ts",
+    "test:email": "tsx scripts/test-email.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
+    "@react-pdf/renderer": "^4.9.0",
     "@slack/web-api": "^8.0.0",
     "dotenv": "^17.4.2",
     "next": "16.3.2",
+    "nodemailer": "^9.0.6",
     "prisma": "^6.19.3",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -28,6 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/nodemailer": "^8.0.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

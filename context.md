@@ -1,521 +1,482 @@
-# Context: GreyWatch — Grafana → Slack Threshold Monitoring
+# Context: GreyWatch — Multi-Site Monitoring Platform
 
-**Status as of 2026-08-26: built and verified end-to-end on sandbox infrastructure
-(local Grafana + a disposable Slack workspace). Not yet pointed at real
-GreyOrange Grafana/Slack.**
+**Status as of 2026-08-28: built and verified end-to-end on sandbox
+infrastructure** (local Grafana + a disposable Slack workspace + Ethereal
+fake-SMTP email). 31 real GreyOrange site names seeded, all pointed at the
+sandbox Grafana instance for now. Not yet pointed at real per-site Grafana
+URLs, a real Slack workspace, or a real email provider — that's a
+credentials/config change, not a rebuild.
 
 ## How to use this document
 
-This is a complete as-built spec of a working system, written for another LLM
-(or engineer) with zero prior context. It covers: the problem being solved,
-the full tech stack and why each piece was chosen, the exact architecture and
-data model, every external-API integration detail including the non-obvious
-gotchas that cost real debugging time, the visual design system, and a
-frank log of what was tried, what broke, and how it was fixed. It's meant to
-support two things: (a) a critical review of whether this was built the
-right way, and (b) reuse as a starting point for a similarly-shaped project
-(a background poller bridging a metrics source to a chat tool) with
-different technology or design choices.
-
-The original pre-build planning doc (written before any code existed) is
-preserved at `context-original.md` in this repo for comparison — several
-things changed between that plan and what actually got built, and those
-changes are called out explicitly below rather than silently absorbed.
+This supersedes `context-pilot-v1.md` (the single-site pilot this was built
+from) and `context-original.md` (the original pre-build plan). All three
+are kept for history — comparing them shows exactly what changed and why at
+each stage. This document is written for another LLM or engineer with zero
+prior context: the problem, the full architecture, every schema table and
+why it's shaped that way, every integration's non-obvious behavior, and a
+frank log of what broke during the build and how it was fixed.
 
 ---
 
-## 1. The problem
+## 1. What changed from the single-site pilot
 
-An internal tool for a warehouse-operations support team (GreyOrange TAC/L3):
-metrics live on Grafana dashboards (rack-to-rack pick time, orderline
-throughput, per-unit order-wait-time, etc.), and today someone has to be
-looking at the dashboard when a metric drifts out of range. That doesn't
-scale and issues get caught late.
+The pilot (one site, username+Slack-ID login, single-panel-per-task Slack
+alerts) became a real internal platform:
 
-**What it needed to do:**
-1. Let any teammate pick a site (= one Grafana dashboard), one or more
-   panels on it, and a threshold per panel — via dropdowns/checkboxes, never
-   free-typed queries.
-2. Poll those panels in the background.
-3. Post to Slack — with a screenshot — **only** when a threshold is
-   breached. No routine/heartbeat screenshots.
-4. Thread repeat breaches under the first message instead of spamming the
-   channel; respect a cooldown before re-alerting.
-5. Auto-expire after a set duration; allow manual stop.
-6. If the tool itself breaks (can't reach Grafana), tell the person who
-   started the watch — not the shared L3 channel. A broken tool and a bad
-   metric are different problems with different owners.
+- **Real auth**: a shared `CAN Engineer` username+password login, with the
+  `User` model built to support individual users/roles later without
+  another migration.
+- **31 real sites**, each an independent Grafana "instance" (today they all
+  point at the same sandbox Grafana, but the model supports real per-site
+  URLs/tokens).
+- **Dashboard discovery moved to task-creation time** — a site is a Grafana
+  instance, not one fixed dashboard, so picking a dashboard is now step one
+  of creating any task (Slack or email).
+- **Multiple Slack recipients per task**, each with independent DM
+  threading, replacing the old single "DM the creator" concept (which broke
+  entirely once login stopped being personal).
+- **A whole new email subsystem** — scheduled reports (not alerts) per
+  site, reusing the same dashboard/panel-discovery UI and the same
+  DB-driven, restart-safe scheduling pattern as Slack monitoring.
+- **A real home page** — a searchable, filterable, paginated site
+  directory, with two new "Red Zone"/"F90" status concepts stubbed behind a
+  clean provider abstraction pending real APIs.
 
-## 2. Current status
+The original single-site pilot's core mechanics — per-metric independent
+evaluation, cooldown, Slack threading, screenshot-on-breach, the DB-driven
+worker tick loop — are **unchanged in spirit**, just extended from
+"one panel per task" to "many panels, many recipients, many sites."
 
-- Fully built and manually verified against **sandbox infrastructure**: a
-  local Grafana instance in Docker (with `grafana-image-renderer` for
-  screenshots) generating realistic fake data, and a throwaway Slack
-  workspace/app.
-- Every integration point has been exercised with real network calls during
-  development — not just code-reviewed. See §9 for the specific verification
-  runs and what they proved.
-- Not yet connected to the real GreyOrange Grafana/Slack. The intent (see
-  §4) is that this is purely a `.env` change, not a code change.
-- One real feature gap known and explicitly deferred: authentication is a
-  username + Slack-ID cookie with no password (see §8).
+## 2. Tech stack
 
-## 3. Tech stack
+| Layer | Choice | Notes |
+|---|---|---|
+| Frontend + API | Next.js 16, App Router, TypeScript | Unchanged from the pilot. |
+| Background worker | Standalone Node.js/TypeScript process (`tsx`) | Now runs two independent tick loops — Slack and email. |
+| Database | SQLite via Prisma `6.19.3` (pinned — Prisma 7 breaks the schema-based config this relies on) | 11 tables now (see §4). |
+| Auth | Node's built-in `crypto.scrypt` for password hashing | No new dependency. |
+| Slack SDK | `@slack/web-api` | Unchanged. |
+| Email | `nodemailer` | New — `EtherealEmailProvider` for the sandbox, swappable behind an `EmailProvider` interface. |
+| Sandbox infra | Docker Compose — `grafana/grafana-oss:11.4.0` + `grafana-image-renderer` | Unchanged; dashboard content extended (§10). |
 
-| Layer | Choice | Version | Why |
-|---|---|---|---|
-| Frontend + API | Next.js, App Router, TypeScript | 16.3.2 | One project serves the UI and the CRUD API, sharing types between them. |
-| Background worker | Standalone Node.js + TypeScript process (`tsx`) | — | Must run independently of the web app's request/response lifecycle — see §5. |
-| Database | SQLite via Prisma | Prisma `6.19.3` (pinned — see §6.1) | Zero infra to stand up for a pilot; typed queries shared by the app and the worker for free. |
-| Slack SDK | `@slack/web-api` | `^8.0.0` | Official SDK. |
-| Validation | `zod` | `^4.4.3` | Request body validation, and env var validation (see §5.3). |
-| Env loading | `dotenv` | `^17.4.2` | Used by the standalone worker process (Next.js loads `.env` itself). |
-| Dev/test runner | `tsx` | `^4.23.12` | Runs TypeScript directly for the worker and one-off scripts, no build step. |
-| Sandbox infra | Docker Compose — `grafana/grafana-oss:11.4.0` + `grafana/grafana-image-renderer:latest` | — | Reproducible locally, disposable. |
-
-## 4. Architecture
-
-Four pieces, one shared database as the only handoff point between the two
-processes that matter:
+## 3. Architecture
 
 ```
-Browser --(loads UI / calls API)--> Next.js App --(creates/reads tasks)--> SQLite DB
-                                          |                                    ^
-                                          | (panel discovery, live)            | (polls due tasks)
-                                          v                                    v
-                                       Grafana <--(query value + screenshot)-- Worker process
-                                          ^                                    |
-                                          |                                    v
-                                     (renderer sidecar)                     Slack
-                                                                   (postMessage / uploadV2)
+Browser --> Next.js App --> SQLite DB <-- Worker process (two tick loops)
+                |                              |         |
+                | (site-scoped dashboard/panel |         |
+                |  discovery, per site)        |         |
+                v                              v         v
+             Grafana (per-site config)      Grafana    Slack + Ethereal/Email
 ```
 
-**Why a separate worker process, not part of the Next.js app:** Next.js API
-routes only run while answering a request — in a real deployment they can be
-short-lived/serverless. A metric watch needs to keep checking for hours, so
-that logic lives in its own always-running process.
+Same fundamental shape as the pilot (§4 of `context-pilot-v1.md`): the
+database is still the only handoff point between the always-on worker and
+the request/response Next.js app, for the same crash/restart-safety reason.
+What's new is that **Grafana config is now resolved per-site** rather than
+read from one global env client (`lib/grafana.ts`'s `resolveSiteGrafanaConfig`),
+and there are now **two independent due-queries** in the worker — one for
+`MonitorTask.nextCheckAt` (Slack), one for `EmailTask.nextSendAt` (email) —
+each with its own task-level try/catch isolation, so a failure in one never
+affects the other.
 
-**Why state lives in the database, not in memory:** each task has a
-`nextCheckAt` timestamp. The worker's entire job, every 30 seconds, is: ask
-the database which tasks are due, process exactly those, write back
-`nextCheckAt = now + pollIntervalMin`. If the worker crashes, redeploys, or
-the machine it's on restarts, it doesn't need to "remember" anything — it
-just asks the database what's due again, and the database already reflects
-reality. The alternative considered and rejected was one in-memory
-`setInterval`/timer per active task, which loses every active watch on any
-restart, including a dev-mode hot reload.
-
-The worker talks **directly to Prisma/SQLite**, not through the Next.js
-API — this keeps the polling loop's correctness independent of whether the
-Next.js process happens to be up.
-
-## 5. Data model
-
-Four tables. `Site` is a 1:1 mapping to a Grafana dashboard. `MonitorTask`
-represents one watch a teammate started — its shared settings (poll
-interval, cooldown, duration, whether to also DM the creator). Each task can
-watch **multiple panels at once**, each with its own condition — that's
-`TaskMetric`. Every single poll of every metric, successful or not, writes
-a `TaskEvent` — that append-only log is what makes the system debuggable
-after the fact and is the ground truth for "did it alert, when, and why."
+## 4. Data model (11 tables)
 
 ```prisma
 model User {
-  id          String        @id @default(cuid())
-  username    String        @unique
-  slackUserId String        // required for DM paths — see §5.1
-  createdAt   DateTime      @default(now())
-  tasks       MonitorTask[]
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  role         String   @default("engineer") // unused today, future-ready
+  createdAt    DateTime @default(now())
+  tasks        MonitorTask[]
+  emailTasks   EmailTask[]
 }
 
 model Site {
-  id           String        @id @default(cuid())
-  name         String        @unique          // "Site A"
-  dashboardUid String                         // Grafana dashboard UID
-  tasks        MonitorTask[]
+  id              String   @id @default(cuid())
+  name            String   @unique // display name, preserved verbatim — e.g. "GXO-A&F"
+  slug            String   @unique // stable id, e.g. "gxo-a-and-f" — never affects the display name
+  grafanaBaseUrl  String
+  grafanaApiToken String?  // per-site override; null falls back to the shared env token
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tasks           MonitorTask[]
+  emailTasks      EmailTask[]
 }
 
 model MonitorTask {
-  id              String       @id @default(cuid())
+  id              String   @id @default(cuid())
   siteId          String
-  pollIntervalMin Int          // preset minutes — shared by every metric on this task
-  cooldownMin     Int          // preset minutes — shared by every metric on this task
-  durationMin     Int          // preset minutes
-  status          String       @default("active") // active | stopped | expired
+  dashboardUid    String   // chosen at creation time — see §1
+  pollIntervalMin Int
+  cooldownMin     Int
+  durationMin     Int
+  status          String   @default("active") // active | stopped | expired
   createdById     String
-  notifyCreator   Boolean      @default(false)     // also DM the creator on breach, in addition to L3
-  startedAt       DateTime     @default(now())
+  startedAt       DateTime @default(now())
   expiresAt       DateTime
-  nextCheckAt     DateTime     // worker reads this to know what's due
-
-  site      Site         @relation(fields: [siteId], references: [id])
-  createdBy User         @relation(fields: [createdById], references: [id])
-  metrics   TaskMetric[]
-
-  @@index([status, nextCheckAt])
+  nextCheckAt     DateTime
+  site       Site @relation(...)
+  createdBy  User @relation(...)
+  metrics    TaskMetric[]
+  recipients NotificationRecipient[]
 }
 
-// One watched panel within a task. A task can watch several panels on the
-// same site at once (e.g. Rack-to-Rack Time AND Orderline Throughput) —
-// each gets its own condition and is polled/evaluated/alerted independently,
-// even though they share the parent task's poll interval and cooldown.
+model NotificationRecipient {
+  id          String   @id @default(cuid())
+  taskId      String
+  slackUserId String
+  createdAt   DateTime @default(now())
+  task    MonitorTask @relation(...)
+  threads RecipientAlertThread[]
+}
+
 model TaskMetric {
-  id              String    @id @default(cuid())
-  taskId          String
-  panelId         Int       // Grafana panel ID
-  panelTitle      String    // cached at creation time, for display
-  operator        String    // "gt" | "lt" | "gte" | "lte" | "eq"
-  threshold       Float
-  lastStatus      String?   // "ok" | "breached" | "error"
-  lastAlertAt     DateTime? // cooldown gate, per metric
-  threadTs        String?   // L3 channel Slack thread_ts, per metric
-  creatorThreadTs String?   // creator DM Slack thread_ts, per metric
+  id          String    @id @default(cuid())
+  taskId      String
+  panelId     Int
+  panelTitle  String
+  operator    String
+  threshold   Float
+  lastStatus  String?
+  lastAlertAt DateTime? // shared cooldown clock across L3 + every recipient
+  threadTs    String?   // L3 channel thread, per metric
+  task             MonitorTask @relation(...)
+  events           TaskEvent[]
+  recipientThreads RecipientAlertThread[]
+}
 
-  task   MonitorTask @relation(fields: [taskId], references: [id])
-  events TaskEvent[]
-
-  @@index([taskId])
+// Per-metric, per-recipient DM thread — cooldown is one shared clock
+// (TaskMetric.lastAlertAt), but each person has their own DM conversation.
+model RecipientAlertThread {
+  id          String @id @default(cuid())
+  metricId    String
+  recipientId String
+  threadTs    String
+  metric    TaskMetric             @relation(...)
+  recipient NotificationRecipient  @relation(...)
+  @@unique([metricId, recipientId])
 }
 
 model TaskEvent {
   id            String   @id @default(cuid())
   metricId      String
   checkedAt     DateTime @default(now())
-  success       Boolean  // false = Grafana call failed
+  success       Boolean
   errorMessage  String?
   capturedValue Float?
   breached      Boolean?
-  alerted       Boolean  @default(false) // true if this check resulted in a Slack post
+  alerted       Boolean  @default(false)
+  metric TaskMetric @relation(...)
+}
 
-  metric TaskMetric @relation(fields: [metricId], references: [id])
+// --- Email (new) ---
 
-  @@index([metricId, checkedAt])
+model EmailTask {
+  id           String    @id @default(cuid())
+  siteId       String
+  dashboardUid String
+  intervalMin  Int       // coarser presets than Slack polling — see §8
+  durationMin  Int
+  status       String    @default("active")
+  createdById  String
+  startedAt    DateTime  @default(now())
+  expiresAt    DateTime
+  nextSendAt   DateTime
+  lastSentAt   DateTime?
+  site Site @relation(...)
+  createdBy User @relation(...)
+  metrics EmailTaskMetric[]
+  recipients EmailRecipient[]
+  sendEvents EmailSendEvent[]
+}
+
+model EmailTaskMetric {
+  id          String  @id @default(cuid())
+  emailTaskId String
+  panelId     Int
+  panelTitle  String
+  operator    String? // optional — informational annotation only, no alerting
+  threshold   Float?
+  emailTask EmailTask @relation(...)
+}
+
+model EmailRecipient {
+  id          String @id @default(cuid())
+  emailTaskId String
+  email       String
+  kind        String // "to" | "cc"
+  emailTask EmailTask @relation(...)
+}
+
+model EmailSendEvent {
+  id             String   @id @default(cuid())
+  emailTaskId    String
+  sentAt         DateTime @default(now())
+  success        Boolean
+  errorMessage   String?
+  recipientCount Int
+  emailTask EmailTask @relation(...)
 }
 ```
 
-### 5.1 A schema gap the original plan missed
+### 4.1 Why dashboard moved off `Site`
 
-The pre-build plan's `User` model had no field for a Slack member ID, even
-though DMing the creator (on breach, and on tool failure) is a stated
-requirement. `slackUserId` was added mid-build, required, collected at
-login. Worth flagging in any review: **trace every feature requirement all
-the way down to the data it needs to store** — this one was easy to miss
-because the login flow itself didn't obviously need it.
+The pilot's `Site.dashboardUid` assumed one dashboard per site. Once a site
+became "a Grafana instance" (which can host many dashboards), that
+assumption broke — dashboard selection had to move to whichever thing
+actually watches ONE dashboard, which is a task (`MonitorTask`/`EmailTask`),
+not the site. This was deliberately sequenced late (after auth, sites, and
+the Grafana refactor were already stable) so each migration stayed focused.
 
-### 5.2 Multi-metric was a mid-build addition, not the original design
+### 4.2 Why `NotificationRecipient` + `RecipientAlertThread` are two tables
 
-The original plan had one panel/threshold per task (`panelId`,
-`panelTitle`, `operator`, `threshold` directly on `MonitorTask`). Multi-metric
-support was requested after the user saw a real Grafana dashboard with many
-independent KPIs on one screen and wanted to watch several at once under one
-task. The schema was restructured to move those fields into the child
-`TaskMetric` table. This was a genuine breaking migration — SQLite can't
-auto-populate a new required `metricId` foreign key on existing `TaskEvent`
-rows — see §10 for how that was handled.
+`NotificationRecipient` is "who to DM." `RecipientAlertThread` is "which
+Slack thread does *this* metric's conversation with *this* recipient live
+in." They're separate because cooldown is one shared clock per metric
+(`TaskMetric.lastAlertAt`) but threading is inherently per-person — Alice
+and Bob each have their own DM conversation with the bot, so a repeat
+breach must reply in each of their own threads independently, even though
+both are gated by the same cooldown timer.
 
-## 6. Grafana integration
+### 4.3 Why `EmailTaskMetric.operator`/`threshold` are optional
 
-Three endpoints, each doing exactly one job:
+Email is a **report**, not a second alerting system — no cooldown, no
+threading, no Slack-style dedup. But the spec wanted reports to be able to
+annotate "over/under threshold" as context. Making these two fields
+nullable gets that without duplicating any of Slack's alerting machinery
+internally.
 
-| Purpose | Endpoint | Notes |
-|---|---|---|
-| Panel discovery (populates the picker) | `GET /api/dashboards/uid/{uid}` | Returns `dashboard.panels[]`; used live every time the new-task form loads a site, never cached. |
-| Live metric value | `POST /api/ds/query` | **Never hardcoded per datasource.** The app reads the panel's own existing target/query straight out of the dashboard JSON (whatever it is — a TestData scenario for the sandbox, a real InfluxDB query for production) and re-issues it with a fresh time range. This is what lets the same code work against any panel type without per-datasource logic — the worker doesn't know or care what's behind a panel. |
-| Screenshot on breach | `GET /render/d-solo/{dashboardUid}?panelId={id}&width=1000&height=500&from=now-1h&to=now` | Requires the `grafana-image-renderer` sidecar (see §8). |
+## 5. Authentication
 
-**The metric value is never read from the screenshot (no OCR, no guessing
-from the image).** The threshold check always uses the number from
-`/api/ds/query`. The screenshot is purely for a human glancing at Slack.
+`lib/passwords.ts` — `crypto.scrypt`-based hash/verify, format
+`"salt:hash"` in one column, no new dependency. Login
+(`app/api/auth/login/route.ts`) compares against the stored hash and
+returns the same error for "no such user" and "wrong password." The
+session is unchanged in shape from the pilot — an httpOnly cookie holding
+`user.id` — but is now gated by a real password instead of trust.
 
-The Grafana API token used is a **Viewer-role service account token** —
-this tool only ever reads, so its credential can't write.
+`middleware.ts` (new) does a fast, edge-safe presence check on the session
+cookie for every route except `/login` and the login API, redirecting to
+`/login` if absent. This is **defense in depth, not the authoritative
+check** — edge middleware can't query SQLite, so every protected page still
+calls `getCurrentUser()` (a real DB lookup) itself.
 
-## 7. Slack integration
+The shared `CAN Engineer` account is seeded from `CAN_ENGINEER_USERNAME`/
+`CAN_ENGINEER_PASSWORD` env vars (`prisma/seed.ts`) — never hardcoded,
+never in frontend code. Adding individual users later is just adding more
+`User` rows with their own credentials; nothing about the schema or login
+flow assumes there's only one account.
 
-`@slack/web-api`. Two outbound call shapes:
+## 6. Sites: model, seeding, and adding new ones
 
-- **`chat.postMessage`** — first breach for a metric creates a new
-  top-level message (no `thread_ts`); every later breach for that same
-  metric posts with `thread_ts` set to the stored one, so a persistent issue
-  reads as one conversation instead of flooding the channel.
-- **`files.uploadV2`** — attaches the panel screenshot to that same
-  message/thread, with a text comment distinguishing first alert ("🚨
-  Threshold breached") from a repeat ("🚨 Still breached — Xm since last
-  alert").
+**The 31-site seed** (`prisma/siteSeedData.ts`) is the user-provided list
+with two confirmed copy-paste duplicates removed (`GXO-A&F` appeared twice
+with different hyphenation; `GXO-H&M` appeared as an exact duplicate).
+Every other name is preserved **verbatim** — no normalization of
+similar-looking names, per explicit instruction. `lib/siteSlug.ts` derives
+a stable machine slug from each name (lowercase, `&`→`and`, punctuation→
+hyphens) without ever touching the display name.
 
-Failure notifications (`notifyCreatorOfFailure`) use `chat.postMessage`
-alone, DMing the task creator directly — no screenshot, since there's no
-successful metric read to show.
+`prisma/seed.ts`'s site-seeding is an idempotent upsert-by-slug — safe to
+re-run, and checks for slug collisions before writing anything.
 
-**Bot scopes required**, discovered incrementally (see §10 for the exact
-bugs each of these fixed):
+**Adding a new site today** (no admin UI yet, by design — see §14): add a
+name to `INITIAL_SITE_NAMES` in `prisma/siteSeedData.ts` and re-run
+`npm run db:seed`, or insert a `Site` row directly (`name`, `slug`,
+`grafanaBaseUrl`, optionally `grafanaApiToken`). The backend foundation for
+a real site-management API already exists as a pattern in
+`app/api/sites/route.ts` (GET with search/filter/sort/pagination) — adding
+`POST`/`PATCH` there for a future admin UI is a small, contained addition,
+not a new subsystem.
 
-| Scope | Why |
+**Pointing a site at its real Grafana**: update that one `Site` row's
+`grafanaBaseUrl` (and `grafanaApiToken` if it needs its own credential
+instead of the shared env one). No other code changes — every Grafana call
+in the app already resolves config per-site via `resolveSiteGrafanaConfig`.
+
+## 7. Grafana integration (per-site)
+
+`lib/grafana.ts` functions all take a `GrafanaConfig { baseUrl, token }`
+resolved per-site, instead of reading one global env client:
+
+| Function | Purpose |
 |---|---|
-| `chat:write` | Post messages and thread replies. |
-| `files:write` | Upload screenshots. |
-| `files:read` | **Easy to miss.** `files.uploadV2` reads the file back after uploading to confirm it landed — silently requires this even though the older `files.upload` method didn't. |
-| `channels:read` (or `groups:read` for a private channel) | Needed to post into the L3 channel. |
-| `im:write` | **Also easy to miss, and more subtle.** Required to resolve a Slack user ID into a real DM conversation via `conversations.open`. `chat.postMessage` alone will silently auto-open a DM given a bare user ID as `channel` — but `files.uploadV2`'s `channel_id` will not do that same auto-open, and fails with `invalid_arguments` on `/channel_id`. The fix (`lib/slack.ts`'s `resolveChannelId`) calls `conversations.open` explicitly for any target that looks like a user ID (`U`/`W` prefix) before either call, rather than relying on `chat.postMessage`'s implicit behavior. Channel IDs (`C`/`G` prefix) pass through unchanged. |
+| `listDashboards(config)` | `GET /api/search?type=dash-db` — every dashboard on that instance. Powers the dashboard-discovery step of task creation. |
+| `getPanels(config, dashboardUid)` | `GET /api/dashboards/uid/{uid}` — panels on a specific dashboard, once one's chosen. |
+| `queryMetricValue(config, dashboardUid, panelId)` | Re-issues the panel's own stored query against `/api/ds/query` — works against any datasource type with zero per-datasource logic (proven again in Phase 13 by adding `stat`/`gauge` panels with zero code changes). |
+| `captureScreenshot(config, dashboardUid, panelId)` | `/render/d-solo/...` — used by both Slack alerts and email reports. |
 
-The bot must also be `/invite`d into the target channel before it can post
-there, even with `chat:write`.
+## 8. Slack monitoring (per-site, multi-metric, multi-recipient)
 
-## 8. Sandbox infrastructure (Docker Compose)
+Creation flow (`app/sites/[slug]/slack-tasks/new`): pick a dashboard
+(searchable, discovered live) → pick one or more panels on it → per-panel
+operator+threshold → shared poll interval/cooldown/duration → optional
+Slack recipients (chip-based add/remove, `U...` member IDs).
 
-`docker-compose.yml` runs two services: `grafana` (11.4.0, pinned — see
-§10) and `renderer` (`grafana-image-renderer:latest`), wired together via
-`GF_RENDERING_SERVER_URL`. A provisioned `TestData` datasource and a
-`site-a` dashboard (3 panels tuned to mirror real fulfillment metrics —
-Rack-to-Rack Time, Orderline Throughput, Per-Unit OWT — with bounded
-random-walk ranges chosen so a reasonable threshold trips every few minutes)
-let the whole pipeline be proven without needing real production Grafana
-access first.
+Worker (`worker/index.ts`, `processMetric`): each metric, each tick,
+independently — evaluate, and on breach past cooldown: post/thread the L3
+channel alert, then loop over the task's recipients **each in its own
+try/catch**, resolving/creating a `RecipientAlertThread` per recipient so
+each person's repeat breaches thread correctly in their own DM. A failed
+recipient DM never undoes the L3 post or blocks any other recipient — this
+was directly proven with a real broken Slack ID during testing (§13).
 
-Two non-obvious Docker-specific fixes are already baked into the compose
-file (see §10.2–10.3 for the debugging story): a shared `AUTH_TOKEN` between
-the two containers, and explicit `GF_SERVER_DOMAIN`/`GF_SERVER_ROOT_URL`
-matching the internal Docker hostname.
+Poll/API failures now DM **every configured recipient** on the task
+(`notifyCreatorOfFailure`, called once per recipient) — there's no single
+"creator" identity left to fall back to under the shared login, so this is
+the closest faithful translation of the pilot's original "a broken tool is
+the requester's problem, not L3's" reasoning.
 
-**What changes for real GreyOrange Grafana:** `GRAFANA_BASE_URL` and
-`GRAFANA_API_TOKEN` point at the real instance instead; the `Site` table
-gets a real `dashboardUid`. No application code should need to change,
-because of the "reuse the panel's own query" design in §6 — if it does,
-that's a sign something here quietly assumed sandbox-specific behavior.
+## 9. Email monitoring (scheduled reports)
 
-## 9. The worker tick loop
+Creation flow (`app/sites/[slug]/email-tasks/new`) mirrors Slack's exactly
+for dashboard/panel discovery, but: thresholds are optional (informational
+only), there are separate To/CC recipient lists (email addresses, not
+Slack IDs), and interval presets are much coarser (`EMAIL_INTERVAL_PRESETS_MIN
+= [60, 240, 720, 1440]` — 1h/4h/12h/24h) specifically so a report task
+can't be configured to spam an inbox every minute the way a Slack poll
+reasonably can.
 
-Runs every 30 seconds (`worker/index.ts`). Per due task:
+`lib/email.ts` defines an `EmailProvider` interface; `EtherealEmailProvider`
+is the sandbox implementation — a disposable fake-SMTP account, nothing
+ever actually delivered, every send returns a preview URL. A real provider
+(SES, SendGrid, an internal relay) implements the same interface later.
+`lib/emailTemplate.ts` renders a table-based HTML email with inline styles
+(the only style that survives real email clients) — site name, timestamp,
+each metric's value with screenshot inlined via `cid:` attachment, an
+optional threshold/breach annotation, and a graceful per-metric error row
+if that panel couldn't be read — never a raw JSON dump.
 
-```
-tick():
-  dueTasks = MonitorTask where status=active AND nextCheckAt <= now
-             (include site, createdBy, metrics)
+Worker (`emailTick`/`processEmailTask`): same DB-driven `nextSendAt`
+pattern as Slack's `nextCheckAt`. One metric failing degrades to an error
+row in the report rather than aborting the whole send; one task failing
+(bad Grafana config, send rejected) is isolated from every other task,
+Slack or email, in the same tick.
 
-  for task in dueTasks:
-    if task.expiresAt <= now: mark expired; continue
+## 10. Local Grafana sandbox
 
-    for metric in task.metrics:            # <-- each metric isolated, see below
-      try:
-        value = queryMetricValue(site.dashboardUid, metric.panelId)
-        breached = evaluateThreshold(value, metric.operator, metric.threshold)
-        log TaskEvent{success:true, capturedValue, breached}
+`provisioning/dashboards/site-a.json` now has 10 panels across 3
+visualization types — `timeseries` (Rack-to-Rack Time, Orderline
+Throughput, Per-Unit OWT — the original 3, unchanged), `stat` (Assigned/
+Logged-In PPS, Per-Face OWT, Open/Completed Orders), and `gauge` (Picks Per
+Rack Face, PPS UPH) — mirroring the reference GreyOrange dashboard's
+structure with dummy `TestData` random-walk values. Confirmed live that
+`queryMetricValue`/`captureScreenshot` work identically against every panel
+type with no code changes.
 
-        if breached and (cooldown elapsed since metric.lastAlertAt):
-          screenshot = captureScreenshot(site.dashboardUid, metric.panelId)
-          metric.threadTs = postBreach(L3_CHANNEL_ID, metric.threadTs, screenshot, ...)
-          if task.notifyCreator:
-            try:
-              metric.creatorThreadTs = postBreach(createdBy.slackUserId, metric.creatorThreadTs, screenshot, ...)
-            catch: log only — must not undo the L3 alert that already succeeded (see §10.6)
-          metric.lastAlertAt = now
-        metric.lastStatus = breached ? "breached" : "ok"
-      catch (err):
-        log TaskEvent{success:false, errorMessage}
-        metric.lastStatus = "error"
-        try: notifyCreatorOfFailure(createdBy.slackUserId, ...)  # DM, never L3
-        catch: log only, don't crash the tick
+## 11. Home page (site directory)
 
-      save metric
+`GET /api/sites` — search (name contains), `redZone`/`f90`/`slackActive`/
+`emailActive` boolean filters, sort (name/most-active/most-breached), and
+**cursor-based pagination** (an opaque cursor = the last returned site's
+id in the current sort order; correct because the sort is deterministic).
+Active-task and breached-metric counts are computed via **one query each**
+(`monitorTask.findMany`/`emailTask.findMany` with a `select`, reduced in
+memory into per-site maps) rather than a per-site N+1 lookup — explicitly
+chosen and verified at this scale (tens of sites) over a raw-SQL groupBy
+across the relation chain.
 
-    task.nextCheckAt = now + task.pollIntervalMin
-    save task
-```
+`lib/status/redZone.ts` and `lib/status/f90.ts` are the mock status
+provider — deterministic per site (a stable hash, not random-per-request),
+completely decoupled from the `Site` model and from every UI component
+that reads them. Swapping in real Red Zone/F90 APIs later means rewriting
+the body of these two functions and nothing else.
 
-**Each metric has its own try/catch.** One panel failing to query (bad
-panel ID, Grafana down, whatever) must not stop the task's other metrics
-from being checked in the same tick — verified directly (§9.1).
-
-**Poll/API failures DM the creator, never L3.** An unreachable Grafana
-means the tool broke, not that the metric is bad — that's the requesting
-engineer's problem, not something L3 should be paged about.
-
-### 9.1 What was actually verified (not just code-reviewed)
-
-Real runs during development, against the live sandbox:
-
-- A task with 3 metrics (2 real panels + 1 deliberately bogus panel ID):
-  confirmed the 2 real metrics were evaluated and alerted independently
-  while the bogus one failed in isolation, never blocking the others.
-- Forced a guaranteed breach on 2 real metrics: confirmed each got its own
-  independent Slack thread (`threadTs`) in the L3 channel.
-- Backdated `lastAlertAt` past the cooldown and re-triggered: confirmed the
-  repeat breach **reused the same thread** (`threadTs` unchanged) rather
-  than posting a duplicate top-level message.
-- Pointed `GRAFANA_BASE_URL` at an unreachable address with a task active:
-  confirmed the failure was logged as its own `TaskEvent`, a DM went to the
-  creator, and the L3 channel was never touched.
-- Live DM test (after adding the `im:write` scope): confirmed a first-breach
-  DM, a repeat-breach DM reusing the same `creatorThreadTs`, and a failure
-  DM all post correctly.
-- Full UI flow driven with a headless browser (login → multi-metric task
-  creation, panels populated live from Grafana → tasks list → stop),
-  screenshotted in both light and dark themes, zero console errors.
-
-## 10. Bugs found and fixed during the build (read this before reviewing)
-
-These are worth a reviewer's specific attention — each was a real,
-non-obvious failure discovered by actually running the system, not by
-reading the code:
-
-1. **Prisma 7 breaks the "swap `.env`, not code" promise.** A plain
-   `npm install prisma` pulls the latest major version, which removes `url`
-   from the `datasource` block in the schema and requires a driver-adapter
-   package for SQLite. Pinned to `6.19.3` instead, matching the original
-   plan's simple schema-based config. Anyone reusing this project should
-   re-check this pin against whatever Prisma version is current when they
-   start.
-2. **Grafana refuses a default renderer token in newer versions.** Fresh
-   `grafana-oss:latest` failed to start with `renderer_token is not allowed
-   for production settings`. Fixed with an explicit shared
-   `GF_RENDERING_RENDERER_TOKEN` (Grafana side) / `AUTH_TOKEN` (renderer
-   side) — note the **names don't match** despite configuring the same
-   value; this is easy to get wrong once, let alone from a cold start.
-3. **The render callback needs an explicit domain.** The renderer's callback
-   to Grafana (`http://grafana:3000/...`) was silently rejected by Grafana's
-   `validate_action_url` middleware because Grafana's default `root_url`
-   domain didn't match the Docker-network hostname. Fixed with explicit
-   `GF_SERVER_DOMAIN=grafana` / `GF_SERVER_ROOT_URL=http://grafana:3000/`.
-4. **`files.uploadV2` silently needs `files:read`**, unlike the older
-   `files.upload` — see §7.
-5. **`files.uploadV2` needs `im:write` for DMs, but `chat.postMessage`
-   doesn't** — the two Slack methods handle a bare user-ID `channel` target
-   inconsistently. See §7's `im:write` row for the full mechanism; this was
-   the single most confusing bug in the whole build, because the symptom
-   (`invalid_arguments` on `/channel_id`) gave no hint that scopes, not
-   argument shape, were the actual problem.
-6. **A DM failure was silently corrupting a successful channel alert's
-   saved state.** Once `notifyCreator` support existed, a missing `im:write`
-   scope caused the creator-DM `postBreach` call to throw — but that
-   exception was thrown from inside the *same* try block that had already
-   posted successfully to the L3 channel, so the whole metric got logged as
-   "error" and the L3 message's `threadTs` was never saved (meaning a repeat
-   breach would have posted a duplicate instead of threading). Fixed by
-   wrapping the creator-DM call in its own inner try/catch, isolated from
-   the channel-alert code path.
-7. **A newer bleeding-edge `grafana-image-renderer` build turned out to be
-   flaky under load** (an occasional 30s+ timeout on `/render`, confirmed
-   as a one-off by immediately retrying successfully 3/3 times). Not
-   "fixed" per se — the worker's existing retry-on-next-poll behavior
-   already absorbs this, and it's noted in `SETUP.md` as expected.
-8. **A stray `package.json`/`package-lock.json` in the parent home
-   directory** confused Turbopack's workspace-root detection into an
-   unrelated warning. Fixed by pinning `turbopack.root` explicitly in
-   `next.config.ts` — worth doing regardless of whether that stray file
-   exists on a given machine.
-
-## 11. Design decisions (the "why", not just the "what")
-
-| Decision | Alternative considered | Why this one |
-|---|---|---|
-| State lives in the DB (`nextCheckAt`), not in-process timers | One `setInterval`/timer per active task | Timers vanish on any restart (crash, redeploy, hot reload); a DB column doesn't. |
-| Standalone worker process, separate from the Next.js app | Cron-style job inside a Next.js API route | API routes don't stay alive between requests and can be short-lived/serverless in real deployments. |
-| SQLite via Prisma | Postgres | Zero infra for a pilot; typed client shared for free between the app and the worker. |
-| Metric values always from `/api/ds/query` | Reading the screenshot / OCR | The screenshot is for a human; the threshold decision needs a real number, not an image guess. |
-| Re-issue each panel's own existing query, never hardcode per-datasource logic | A TestData-specific query builder | Makes the same code work against a real InfluxDB-backed panel with zero changes — the whole point of the sandbox/real split in §8. |
-| Cooldown + Slack threading | Alert on every breached poll | Without it, a metric hovering at the threshold would spam on every single check. |
-| Poll/API failures DM the creator, never L3 | Post failures to L3 too | A broken tool and a bad metric are different problems for different owners; L3 shouldn't be paged for the former. |
-| Multi-metric: independent per-metric state (`lastStatus`, `lastAlertAt`, `threadTs`), shared task-level settings (poll interval, cooldown, duration) | Fully independent tasks per metric, or one shared alert state per task | Metrics on the same task legitimately breach at different times and need independent cooldowns/threads, but a teammate thinks of "watching this site" as one task, not N separate ones — see §5.2. |
-| Poll interval / cooldown / duration are fixed presets, not free-text | Free-text minute fields | Prevents a 1-second poll interval that hammers Grafana, or a watch nobody remembers is running 6 months later. |
-| Grafana service account is Viewer-role only | A broader role "to be safe" | The tool never writes to Grafana — its credential shouldn't be able to either. |
-| Username + Slack-ID cookie, no password | Real SSO from day one | Enough to attribute tasks and route DMs during a small pilot; explicitly flagged (not silently shipped) as needing real auth before a wider rollout — see §12. |
-| Env vars validated at startup, split into independent Grafana/Slack/app groups (lazy-loaded via a Proxy, see `lib/env.ts`) | One flat validated-at-import schema | Lets `scripts/test-grafana.ts` and `scripts/test-slack.ts` each be run and fail loudly on their own missing vars, without requiring the other integration to be configured yet — mattered a lot while building, since Grafana and Slack got wired up in separate steps. |
-
-## 12. Known limitations (explicitly deferred, not overlooked)
-
-- **Auth is not real auth.** No password; a Slack member ID is
-  self-reported at login and trusted. Fine for a small pilot with a
-  handful of known teammates, not fine at wider scale.
-- **No task editing.** Stopping and recreating is the only way to change a
-  running task's panels/thresholds/settings.
-- **No multi-site fan-out in one task.** A task's metrics are all on one
-  site (`MonitorTask.siteId` is singular); watching panels across multiple
-  sites needs multiple tasks.
-- **SQLite is a pilot choice.** Fine for one small team on one machine;
-  would need Postgres (or similar) for concurrent multi-instance
-  deployment.
-- **The app and worker both currently run on a developer's laptop.** There
-  is no always-on deployment yet — real use needs a real host.
-- **Grafana render occasionally times out** under the sandbox's specific
-  renderer build (§10.7) — the worker's retry-on-next-poll already covers
-  this, but it's not literally zero-flake.
-
-## 13. Visual design system
-
-Product name: **GreyWatch**. Applied consistently across the app UI and a
-separate manager-facing pitch document built from the same tokens.
-
-- **Type**: IBM Plex Sans (UI chrome, labels, body — weights 400–700) + IBM
-  Plex Mono (data values, timestamps, thresholds, status text) throughout
-  the app. Loaded via Google Fonts (`@import` in `app/globals.css`).
-- **Color** (tokens defined for both light and dark, `prefers-color-scheme`
-  + `[data-theme]` override support):
-  - `--paper` / `--surface` / `--ink` / `--slate` — warm off-white neutrals,
-    not a generic gray, with light/dark pairs.
-  - `--amber` — the single brand accent (primary buttons, brand mark, focus
-    ring). Never reused for status semantics.
-  - `--teal` — "healthy/active" status color, kept a separate hue from the
-    accent.
-  - `--danger` — "breached/error" status color, also a separate hue from
-    the accent (the design principle followed: semantic color is distinct
-    from the brand accent, not a reuse of it).
-- **Layout**: a slim sticky top nav (brand mark + wordmark, nav links,
-  username + logout) rather than a sidebar — the app only has 3
-  destinations, which doesn't justify a sidebar the way a longer document
-  would.
-- **Components worth noting**: the multi-metric picker
-  (`app/tasks/MetricPicker.tsx`) is a checklist where checking a panel
-  reveals an inline condition+threshold row for just that panel; the tasks
-  table nests each task's metrics as a compact sub-table underneath it
-  (always expanded — a handful of metrics per task is the expected scale,
-  and hiding them by default would bury the exact info the page exists to
-  show); status is always a colored pill with a dot, never color alone.
-
-## 14. File map
+## 12. Environment variables
 
 ```
-greywatch/
-├── prisma/
-│   ├── schema.prisma        # §5
-│   ├── migrations/
-│   └── seed.ts              # seeds the "Site A" row
-├── app/
-│   ├── api/
-│   │   ├── auth/login, auth/logout
-│   │   ├── sites, sites/[siteId]/panels   # panel discovery proxy, §6
-│   │   └── tasks, tasks/[id]/stop, tasks/[id]/events
-│   ├── login/page.tsx
-│   ├── tasks/
-│   │   ├── page.tsx           # nested per-task metric table, §13
-│   │   ├── new/page.tsx       # multi-metric picker form
-│   │   ├── MetricPicker.tsx
-│   │   ├── StopButton.tsx, AutoRefresh.tsx
-│   └── globals.css            # design tokens, §13
-├── lib/
-│   ├── grafana.ts             # getPanels, queryMetricValue, captureScreenshot, evaluateThreshold — §6
-│   ├── slack.ts                # postBreach, notifyCreatorOfFailure, resolveChannelId — §7
-│   ├── env.ts                  # lazy per-group env validation — §11
-│   ├── auth.ts, prisma.ts, types.ts
-├── worker/index.ts             # the tick loop, §9
-├── scripts/test-grafana.ts, test-slack.ts   # standalone connectivity checks
-├── provisioning/                # Grafana datasource + dashboard, §8
-├── docker-compose.yml           # §8, §10.2–10.3
-├── SETUP.md                     # step-by-step manual setup (Grafana SA, Slack app/scopes, .env)
-└── context-original.md          # the pre-build plan, for comparison
+# Grafana (shared fallback — per-site override lives in the Site table)
+GRAFANA_BASE_URL=
+GRAFANA_API_TOKEN=
+
+# Slack
+SLACK_BOT_TOKEN=
+L3_CHANNEL_ID=
+
+# App
+DATABASE_URL="file:./dev.db"
+PORT=3000
+
+# Auth — read once at seed time, never at runtime
+CAN_ENGINEER_USERNAME=
+CAN_ENGINEER_PASSWORD=
+
+# Email — optional, defaults to a placeholder; only matters once a real
+# provider (which usually validates the From domain) replaces Ethereal
+EMAIL_FROM=
 ```
 
-## 15. Questions worth putting to a reviewing LLM
+## 13. What was actually verified (live, not just typechecked)
 
-If handing this to another model for critique, these are the genuinely
-open judgment calls worth a second opinion on, rather than settled facts:
+Every phase was checked against the running sandbox as it was built, not
+just code-reviewed. Highlights:
 
-1. Is per-metric independent cooldown/threading (§5.2, §11) the right
-   granularity, or should a task's metrics share one alert state/thread?
-2. Is SQLite + a standalone polling worker the right architecture past
-   pilot scale, or does this need a real job queue (BullMQ, etc.) once
-   there are many teams' worth of tasks?
-3. Is DMing the creator (vs. L3) on tool failure the right call at scale,
-   or does a broken integration eventually need its own dedicated
-   ops-facing alert path?
-4. Is the username+Slack-ID login an acceptable pilot shortcut, or should
-   real auth be a blocker before *any* wider internal use, even informal?
+- Full auth flow: valid/invalid login, protected-route redirect via
+  middleware, logout — via direct HTTP calls against the running app.
+- 31-site seed: exact count, zero slug collisions, idempotent on a second
+  run, all correctly served through the live `/api/sites` API.
+- Dashboard discovery + panel loading through the real sandbox for a
+  non-default site (IKEA), including the worker itself successfully using
+  a task-level `dashboardUid` to pull a real value.
+- Multi-metric + multi-recipient breach, with a **deliberately broken**
+  Slack recipient ID: confirmed the L3 alert and the working recipient's
+  DM both succeeded with independent threads, the broken recipient failed
+  in isolation (`user_not_found`, caught, logged), and a genuine repeat
+  breach past cooldown reused **both** threads correctly across two
+  separate cycles.
+- Email: a real Ethereal send with a **fetched and independently
+  confirmed** rendered email (correct subject/to/cc, real metric value,
+  correct threshold annotation, a graceful error row for a deliberately
+  bogus panel, a real inline screenshot). Confirmed `nextSendAt` advances
+  by exactly `intervalMin`, and confirmed restart-safety by starting a
+  completely fresh worker process and watching it correctly pick up and
+  send a due task purely from DB state.
+- Cross-site isolation: created tasks (Slack and email) under two
+  different sites and confirmed each site's task list shows only its own,
+  while the global `/tasks` view still shows both.
+- A full combined integration pass: one login session creating a
+  multi-metric/multi-recipient Slack task **and** a multi-recipient email
+  task on the same site, running the worker once, and confirming both
+  processed correctly in the same tick cycle with the site details page
+  reflecting real live counts for both immediately afterward.
+- `tsc --noEmit`, `eslint`, and `next build` clean after every phase.
+
+## 14. Known limitations (explicitly deferred, not overlooked)
+
+- **No site-management admin UI.** Adding a site means editing
+  `siteSeedData.ts` or writing a DB row directly — the API foundation
+  (`GET /api/sites` with full filtering) exists, but `POST`/`PATCH` routes
+  and a UI for them aren't built.
+- **Red Zone / F90 are mocked**, deterministic-per-site, not real signals —
+  by design, pending real APIs (§11).
+- **No task-history UI page** — `GET /api/tasks/[id]/events` exists and was
+  verified to return correct per-check history, but nothing in the UI
+  links to it yet.
+- **Email intervals are coarse by design** (1h minimum) — intentional, not
+  a bug, to prevent inbox spam; revisit if a real use case needs finer
+  granularity.
+- Same pilot-era limitations still apply: SQLite is a single-machine
+  choice (fine for this scale, would need Postgres for real concurrent
+  multi-instance deployment); the app and worker still only run on
+  whichever machine starts them — no always-on deployment yet.
+
+## 15. Future integration points
+
+- Real per-site Grafana URLs/tokens — set directly on each `Site` row, no
+  code changes.
+- Real Red Zone / F90 APIs — rewrite `lib/status/redZone.ts` /
+  `lib/status/f90.ts` only.
+- Individual users / organizational SSO — `User.role` and the
+  username+password model are already structured for this; swapping in
+  SSO replaces the login route, not the schema.
+- Real email provider — implement `EmailProvider` (`lib/email.ts`) against
+  SES/SendGrid/an internal relay, configure via env, done.
+- Opsgenie or other incident-management integration — not built; the
+  explicit boundary drawn in this build is that GreyWatch is self-service
+  ad hoc monitoring, not a replacement for existing incident-management
+  tooling, so this would be a deliberate new integration point, not
+  something implied by the current architecture.

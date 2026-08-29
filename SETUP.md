@@ -83,7 +83,48 @@ This app DMs the task creator directly on poll/API failures (and optionally on b
 
 Click your name/profile in Slack → **···** (more) → **Copy member ID** (looks like `U0123ABCDEF`). You'll enter this at login.
 
-## 3. `.env`
+## 3. Email (real delivery via Gmail SMTP)
+
+Skip this section entirely to use the sandbox default — leaving
+`SMTP_HOST`/`SMTP_USER`/`SMTP_PASS` blank in `.env` makes email tasks send
+through Ethereal (a fake-SMTP test service): nothing is really delivered,
+the worker prints a preview URL instead. Fill these in only if you want
+real email tasks to land in a real inbox.
+
+### 3.1 Turn on 2-Step Verification (required for App Passwords)
+
+Google only issues App Passwords to accounts with 2-Step Verification on.
+Go to **[myaccount.google.com/security](https://myaccount.google.com/security)** → **2-Step Verification** → turn it on if it isn't already (you'll verify with your phone).
+
+### 3.2 Generate an App Password
+
+1. Go to **[myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)** (this link only works once 2-Step Verification is on).
+2. Under **App name**, type anything (e.g. `GreyWatch`) → **Create**.
+3. Google shows a 16-character password (looks like `abcd efgh ijkl mnop`). Copy it — this is **not** your normal Gmail password, and Google only shows it once.
+
+### 3.3 Fill in `.env`
+
+```bash
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@gmail.com          # your full Gmail address
+SMTP_PASS=abcdefghijklmnop        # the App Password from 3.2, no spaces
+EMAIL_FROM=you@gmail.com          # should match SMTP_USER — Gmail rejects/flags mismatches
+```
+
+### 3.4 Verify it
+
+```bash
+npm run test:email
+```
+
+If it's actually configured, this sends a **real** email — check the inbox
+of whatever address you put in the script's `to` field (currently
+`engineer@example.com` in `scripts/test-email.ts` — change that to your
+own address to actually receive it, or just watch for the send to succeed
+without a preview URL, which confirms it went through Gmail for real).
+
+## 4. `.env`
 
 ```bash
 cp .env.example .env
@@ -105,9 +146,16 @@ L3_CHANNEL_ID=C0123ABCDEF
 # Local SQLite file — leave as-is for the sandbox
 DATABASE_URL="file:./dev.db"
 PORT=3000
+
+# From step 3.3 — leave blank to use the sandbox's fake-SMTP email instead
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
+EMAIL_FROM=
 ```
 
-## 4. Install, migrate, seed
+## 5. Install, migrate, seed
 
 ```bash
 npm install
@@ -115,16 +163,17 @@ npx prisma migrate dev
 npm run db:seed        # creates the "Site A" row pointing at the site-a dashboard
 ```
 
-## 5. Verify each integration on its own
+## 6. Verify each integration on its own
 
 ```bash
 npm run test:grafana   # fetches panels, queries a live value, captures a screenshot
 npm run test:slack     # posts a fake breach + a fake repeat into L3_CHANNEL_ID
+npm run test:email     # sends a report — real if SMTP_* is set, a preview-only Ethereal send if not
 ```
 
-Both fail loudly with a specific error if something's misconfigured — that's intentional (see `lib/env.ts`).
+Grafana and Slack fail loudly with a specific error if misconfigured — that's intentional (see `lib/env.ts`). Email doesn't fail the same way if left unconfigured — that's also intentional, since it's meant to fall back to the sandbox provider rather than block the rest of the app.
 
-## 6. Run it
+## 7. Run it
 
 You need two processes running side by side:
 

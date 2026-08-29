@@ -21,6 +21,14 @@ const appSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
 });
 
+// The shared "CAN Engineer" account's credentials — never hardcoded, and
+// never in frontend code. Read once by prisma/seed.ts to create/update the
+// account; the app itself only ever compares against the stored hash.
+const authSchema = z.object({
+  CAN_ENGINEER_USERNAME: z.string().min(1, "CAN_ENGINEER_USERNAME is required"),
+  CAN_ENGINEER_PASSWORD: z.string().min(8, "CAN_ENGINEER_PASSWORD must be at least 8 characters"),
+});
+
 function load<T extends z.ZodTypeAny>(schema: T, label: string): z.infer<T> {
   const parsed = schema.safeParse(process.env);
   if (!parsed.success) {
@@ -45,6 +53,7 @@ function lazy<T>(fn: () => T): () => T {
 const loadGrafanaEnv = lazy(() => load(grafanaSchema, "Grafana"));
 const loadSlackEnv = lazy(() => load(slackSchema, "Slack"));
 const loadAppEnv = lazy(() => load(appSchema, "app"));
+const loadAuthEnv = lazy(() => load(authSchema, "auth"));
 
 // Property access (not a plain object) so each group's validation only runs
 // the moment a caller actually reads one of its fields.
@@ -60,10 +69,15 @@ export const appEnv: z.infer<typeof appSchema> = new Proxy({} as never, {
   get: (_target, prop) => loadAppEnv()[prop as keyof z.infer<typeof appSchema>],
 });
 
+export const authEnv: z.infer<typeof authSchema> = new Proxy({} as never, {
+  get: (_target, prop) => loadAuthEnv()[prop as keyof z.infer<typeof authSchema>],
+});
+
 // Combined export for call sites (the Next.js app, the worker) that want
 // every var validated up front, at startup, in one shot.
 export function assertAllEnv(): void {
   loadGrafanaEnv();
   loadSlackEnv();
   loadAppEnv();
+  loadAuthEnv();
 }

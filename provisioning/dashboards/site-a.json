@@ -76,6 +76,83 @@
           "noise": 30
         }
       ]
+    },
+    {
+      "id": 4,
+      "title": "Assigned PPS - Pick Mode",
+      "type": "stat",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "scenarioId": "random_walk", "seriesCount": 1, "min": 10, "max": 30, "startValue": 20, "spread": 2, "noise": 1 }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Logged In PPS - Pick Mode",
+      "type": "stat",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "scenarioId": "random_walk", "seriesCount": 1, "min": 8, "max": 25, "startValue": 18, "spread": 2, "noise": 1 }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Picks Per Rack Face",
+      "type": "gauge",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 5 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "scenarioId": "random_walk", "seriesCount": 1, "min": 1, "max": 5, "startValue": 2, "spread": 0.5, "noise": 0.3 }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "PPS UPH (ITEM Level)",
+      "type": "gauge",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 300 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "scenarioId": "random_walk", "seriesCount": 1, "min": 80, "max": 250, "startValue": 150, "spread": 15, "noise": 8 }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Per-Face OWT (Seconds)",
+      "type": "stat",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "scenarioId": "random_walk", "seriesCount": 1, "min": 15, "max": 35, "startValue": 24, "spread": 3, "noise": 1.5 }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Open Orders",
+      "type": "stat",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "scenarioId": "random_walk", "seriesCount": 1, "min": 5000, "max": 15000, "startValue": 10000, "spread": 500, "noise": 200 }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Completed Orders",
+      "type": "stat",
+      "datasource": { "type": "testdata", "uid": "testdata-ds" },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "scenarioId": "random_walk", "seriesCount": 1, "min": 300, "max": 800, "startValue": 500, "spread": 40, "noise": 20 }
+      ]
     }
   ]
 }

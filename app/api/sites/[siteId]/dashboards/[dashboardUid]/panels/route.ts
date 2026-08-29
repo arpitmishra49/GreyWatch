@@ -1,19 +1,19 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getPanels } from "@/lib/grafana";
+import { getPanels, resolveSiteGrafanaConfig } from "@/lib/grafana";
 
 export async function GET(
   _request: Request,
-  { params }: { params: Promise<{ siteId: string }> },
+  { params }: { params: Promise<{ siteId: string; dashboardUid: string }> },
 ) {
-  const { siteId } = await params;
+  const { siteId, dashboardUid } = await params;
   const site = await prisma.site.findUnique({ where: { id: siteId } });
   if (!site) {
     return NextResponse.json({ error: "Site not found" }, { status: 404 });
   }
 
   try {
-    const panels = await getPanels(site.dashboardUid);
+    const panels = await getPanels(resolveSiteGrafanaConfig(site), dashboardUid);
     return NextResponse.json(panels);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

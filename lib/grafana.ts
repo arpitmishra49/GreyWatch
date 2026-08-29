@@ -16,6 +16,33 @@ export function evaluateThreshold(value: number, operator: Operator, threshold: 
   }
 }
 
+export interface GrafanaConfig {
+  baseUrl: string;
+  token: string;
+}
+
+export interface GrafanaDashboard {
+  uid: string;
+  title: string;
+}
+
+/**
+ * Resolves which Grafana instance/credential a site actually uses. A site's
+ * own grafanaApiToken is a per-site override — null means "use the shared
+ * sandbox/org-wide token from env," which is what every site does today
+ * (31 sites don't need 31 duplicate credentials until real per-site tokens
+ * exist).
+ */
+export function resolveSiteGrafanaConfig(site: {
+  grafanaBaseUrl: string;
+  grafanaApiToken: string | null;
+}): GrafanaConfig {
+  return {
+    baseUrl: site.grafanaBaseUrl,
+    token: site.grafanaApiToken ?? grafanaEnv.GRAFANA_API_TOKEN,
+  };
+}
+
 interface DsQueryFrame {
   schema: { fields: { name: string; type: string }[] };
   data: { values: number[][] };
@@ -25,11 +52,11 @@ interface DsQueryResponse {
   results: Record<string, { status: number; frames?: DsQueryFrame[]; error?: string }>;
 }
 
-async function grafanaFetch(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`${grafanaEnv.GRAFANA_BASE_URL}${path}`, {
+async function grafanaFetch(config: GrafanaConfig, path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`${config.baseUrl}${path}`, {
     ...init,
     headers: {
-      Authorization: `Bearer ${grafanaEnv.GRAFANA_API_TOKEN}`,
+      Authorization: `Bearer ${config.token}`,
       ...init?.headers,
     },
   });
@@ -37,11 +64,27 @@ async function grafanaFetch(path: string, init?: RequestInit): Promise<Response>
 }
 
 /**
+ * Lists every dashboard on a Grafana instance, for the dashboard-discovery
+ * step of task creation (a site is a Grafana instance, which can host many
+ * dashboards — not a fixed 1:1 mapping).
+ */
+export async function listDashboards(config: GrafanaConfig): Promise<GrafanaDashboard[]> {
+  const res = await grafanaFetch(config, `/api/search?type=dash-db`);
+  if (!res.ok) {
+    throw new Error(`Grafana dashboard search failed: ${res.status} ${await res.text()}`);
+  }
+  const body = (await res.json()) as { uid: string; title: string }[];
+  return body
+    .filter((d) => typeof d.uid === "string" && typeof d.title === "string")
+    .map((d) => ({ uid: d.uid, title: d.title }));
+}
+
+/**
  * Returns the panel list for a dashboard, used to populate the panel dropdown.
  * Panels are read live from Grafana every time — the pilot does not cache them.
  */
-export async function getPanels(dashboardUid: string): Promise<GrafanaPanel[]> {
-  const res = await grafanaFetch(`/api/dashboards/uid/${dashboardUid}`);
+export async function getPanels(config: GrafanaConfig, dashboardUid: string): Promise<GrafanaPanel[]> {
+  const res = await grafanaFetch(config, `/api/dashboards/uid/${dashboardUid}`);
   if (!res.ok) {
     throw new Error(`Grafana dashboard lookup failed: ${res.status} ${await res.text()}`);
   }
@@ -62,10 +105,11 @@ export async function getPanels(dashboardUid: string): Promise<GrafanaPanel[]> {
  * type without per-datasource logic.
  */
 export async function queryMetricValue(
+  config: GrafanaConfig,
   dashboardUid: string,
   panelId: number,
 ): Promise<number> {
-  const res = await grafanaFetch(`/api/dashboards/uid/${dashboardUid}`);
+  const res = await grafanaFetch(config, `/api/dashboards/uid/${dashboardUid}`);
   if (!res.ok) {
     throw new Error(`Grafana dashboard lookup failed: ${res.status} ${await res.text()}`);
   }
@@ -85,7 +129,7 @@ export async function queryMetricValue(
     throw new Error(`Panel ${panelId} has no datasource attached to its query`);
   }
 
-  const queryRes = await grafanaFetch(`/api/ds/query`, {
+  const queryRes = await grafanaFetch(config, `/api/ds/query`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -121,10 +165,12 @@ export async function queryMetricValue(
  * via GF_RENDERING_SERVER_URL on the Grafana container.
  */
 export async function captureScreenshot(
+  config: GrafanaConfig,
   dashboardUid: string,
   panelId: number,
 ): Promise<Buffer> {
   const res = await grafanaFetch(
+    config,
     `/render/d-solo/${dashboardUid}?panelId=${panelId}&width=1000&height=500&from=now-1h&to=now`,
   );
   if (!res.ok) {

@@ -13,7 +13,7 @@ export async function POST(
 
   const updated = await prisma.monitorTask.update({
     where: { id },
-    data: { status: "stopped" },
+    data: { status: "stopped", stoppedAt: new Date() },
   });
 
   return NextResponse.json(updated);

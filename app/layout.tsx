@@ -25,7 +25,10 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
           <div className="nav-right">
             {user ? (
               <>
-                <span className="username">{user.username}</span>
+                <span className="nav-status">
+                  <span className="dot" aria-hidden="true"></span>
+                  <span className="username">{user.username}</span>
+                </span>
                 <LogoutButton />
               </>
             ) : (

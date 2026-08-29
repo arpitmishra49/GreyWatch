@@ -82,16 +82,17 @@ export async function postBreach(
 }
 
 /**
- * DMs the task's creator directly (channel = their Slack member ID) rather
- * than posting anywhere shared. A poll/API failure means "the tool is
- * broken," which is the creator's problem to fix, not L3's.
+ * DMs a single Slack user directly (never posts anywhere shared) that a
+ * task failed. A poll/API failure means "the tool is broken," which is the
+ * requester's problem to fix, not L3's — the worker calls this once per
+ * configured NotificationRecipient on the task, each independently.
  */
 export async function notifyCreatorOfFailure(
-  creatorSlackId: string,
+  recipientSlackId: string,
   taskDescription: string,
   error: string,
 ): Promise<void> {
-  const channelId = await resolveChannelId(creatorSlackId);
+  const channelId = await resolveChannelId(recipientSlackId);
   await slack.chat.postMessage({
     channel: channelId,
     text: `⚠️ Monitor task failed: *${taskDescription}*\n\`\`\`${error}\`\`\`\nThis means the tool couldn't reach Grafana — the underlying metric may be fine. The task will retry on its next poll.`,

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 export default function LoginPage() {
   const router = useRouter();
   const [username, setUsername] = useState("");
-  const [slackUserId, setSlackUserId] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -18,13 +18,13 @@ export default function LoginPage() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, slackUserId }),
+        body: JSON.stringify({ username, password }),
       });
       if (!res.ok) {
         const body = await res.json();
         throw new Error(body.error ?? "Login failed");
       }
-      router.push("/tasks");
+      router.push("/");
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -43,10 +43,7 @@ export default function LoginPage() {
         <h1>
           Log in<span className="accent-dot">.</span>
         </h1>
-        <p className="subtitle">
-          No password — this is just enough to attribute tasks and route Slack
-          DMs to the right teammate.
-        </p>
+        <p className="subtitle">Sign in with your GreyWatch credentials to manage monitoring tasks.</p>
         <form onSubmit={handleSubmit}>
           <div className="field">
             <label htmlFor="username">Username</label>
@@ -54,17 +51,20 @@ export default function LoginPage() {
               id="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="e.g. arpit"
+              placeholder="e.g. can.engineer"
+              autoComplete="username"
               required
             />
           </div>
           <div className="field">
-            <label htmlFor="slackUserId">Slack member ID</label>
+            <label htmlFor="password">Password</label>
             <input
-              id="slackUserId"
-              value={slackUserId}
-              onChange={(e) => setSlackUserId(e.target.value)}
-              placeholder="e.g. U0123ABC456"
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              autoComplete="current-password"
               required
             />
           </div>

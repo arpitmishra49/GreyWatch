@@ -10,42 +10,78 @@ datasource db {
 }
 
 model User {
-  id          String        @id @default(cuid())
-  username    String        @unique
-  // Not in context.md's original schema — added because "notify creator on
-  // breach" and "poll/API failure notifies the creator" both DM by Slack
-  // member ID (see context.md's Slack Integration Details), and nothing else
-  // in the pilot's username-only login captures it.
-  slackUserId String
-  createdAt   DateTime      @default(now())
-  tasks       MonitorTask[]
+  id           String        @id @default(cuid())
+  username     String        @unique
+  passwordHash String
+  // Unused today (one shared "CAN Engineer" account) but the User model is
+  // built to support individual users and roles later without another
+  // migration.
+  role         String        @default("engineer")
+  createdAt    DateTime      @default(now())
+  tasks        MonitorTask[]
+  emailTasks   EmailTask[]
 }
 
 model Site {
-  id           String        @id @default(cuid())
-  name         String        @unique // "Site A"
-  dashboardUid String // Grafana dashboard UID
-  tasks        MonitorTask[]
+  id                String             @id @default(cuid())
+  name              String             @unique // display name, preserved as given — e.g. "GXO-A&F"
+  slug              String             @unique // stable machine identifier, e.g. "gxo-a-and-f"
+  grafanaBaseUrl    String // e.g. http://localhost:3001 for every site today (sandbox)
+  // Per-site override. Null falls back to the shared GRAFANA_API_TOKEN env
+  // var — so 31 sites don't need 31 duplicate credentials until real
+  // per-site tokens exist.
+  grafanaApiToken   String?
+  isActive          Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  tasks             MonitorTask[]
+  emailTasks        EmailTask[]
+  peakPeriodConfigs PeakPeriodConfig[]
 }
 
 model MonitorTask {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   siteId          String
+  // The dashboard this task watches, chosen at creation time — a Grafana
+  // instance (Site) can host many dashboards, so this no longer lives on
+  // Site itself (see Site.dashboardUid's deprecation note).
+  dashboardUid    String
   pollIntervalMin Int // preset minutes, e.g. 5 — shared by every metric on this task
   cooldownMin     Int // preset minutes, e.g. 15 — shared by every metric on this task
   durationMin     Int // preset minutes, e.g. 240 (4h)
-  status          String   @default("active") // active | stopped | expired
+  status          String    @default("active") // active | stopped | expired
   createdById     String
-  notifyCreator   Boolean  @default(false) // also DM the creator on breach, in addition to L3
-  startedAt       DateTime @default(now())
+  startedAt       DateTime  @default(now())
   expiresAt       DateTime
   nextCheckAt     DateTime // worker reads this to know what's due
+  // Set once, by the stop route, when status transitions to "stopped" — the
+  // Insights reporting module needs this to know precisely where a task's
+  // monitored window ends, rather than guessing from the last TaskEvent.
+  // Null for tasks that are still active or that expired naturally (their
+  // monitored window ends at expiresAt instead).
+  stoppedAt       DateTime?
 
-  site      Site         @relation(fields: [siteId], references: [id])
-  createdBy User         @relation(fields: [createdById], references: [id])
-  metrics   TaskMetric[]
+  site       Site                    @relation(fields: [siteId], references: [id])
+  createdBy  User                    @relation(fields: [createdById], references: [id])
+  metrics    TaskMetric[]
+  recipients NotificationRecipient[]
 
   @@index([status, nextCheckAt])
+}
+
+// A Slack DM target configured on a task — replaces the old single
+// "DM the creator" concept now that login is a shared account with no
+// personal Slack identity. A task can have zero (channel-only) or many.
+model NotificationRecipient {
+  id          String   @id @default(cuid())
+  taskId      String
+  slackUserId String
+  createdAt   DateTime @default(now())
+
+  task    MonitorTask            @relation(fields: [taskId], references: [id])
+  threads RecipientAlertThread[]
+
+  @@index([taskId])
 }
 
 // One watched panel within a task. A task can watch several panels on the
@@ -53,21 +89,39 @@ model MonitorTask {
 // each gets its own condition and is polled/evaluated/alerted independently,
 // even though they share the parent task's poll interval and cooldown.
 model TaskMetric {
-  id              String    @id @default(cuid())
-  taskId          String
-  panelId         Int // Grafana panel ID
-  panelTitle      String // cached at creation time, for display
-  operator        String // "gt" | "lt" | "gte" | "lte" | "eq"
-  threshold       Float
-  lastStatus      String? // "ok" | "breached" | "error" — last known state
-  lastAlertAt     DateTime? // used to enforce cooldown, per metric
-  threadTs        String? // L3 channel Slack thread_ts, per metric
-  creatorThreadTs String? // creator DM Slack thread_ts, per metric
+  id          String    @id @default(cuid())
+  taskId      String
+  panelId     Int // Grafana panel ID
+  panelTitle  String // cached at creation time, for display
+  operator    String // "gt" | "lt" | "gte" | "lte" | "eq"
+  threshold   Float
+  lastStatus  String? // "ok" | "breached" | "error" — last known state
+  lastAlertAt DateTime? // used to enforce cooldown, per metric — shared across the L3 post and every recipient's DM
+  threadTs    String? // L3 channel Slack thread_ts, per metric
 
-  task   MonitorTask @relation(fields: [taskId], references: [id])
-  events TaskEvent[]
+  task             MonitorTask            @relation(fields: [taskId], references: [id])
+  events           TaskEvent[]
+  recipientThreads RecipientAlertThread[]
+  breachIncidents  BreachIncident[]
+  dailyStats       DailyMetricStat[]
 
   @@index([taskId])
+}
+
+// Each recipient gets their own independent DM thread per metric — cooldown
+// is one shared clock (TaskMetric.lastAlertAt), but Alice and Bob each have
+// a separate DM conversation with the bot, so their "still breached" replies
+// must thread separately.
+model RecipientAlertThread {
+  id          String @id @default(cuid())
+  metricId    String
+  recipientId String
+  threadTs    String
+
+  metric    TaskMetric            @relation(fields: [metricId], references: [id])
+  recipient NotificationRecipient @relation(fields: [recipientId], references: [id])
+
+  @@unique([metricId, recipientId])
 }
 
 model TaskEvent {
@@ -83,4 +137,152 @@ model TaskEvent {
   metric TaskMetric @relation(fields: [metricId], references: [id])
 
   @@index([metricId, checkedAt])
+}
+
+// A scheduled email report for a site — separate from Slack monitoring
+// (no thresholds/breaches; just "send this data on a schedule"), but reuses
+// the same site-scoped dashboard/panel selection and the same DB-driven
+// nextSendAt pattern that makes the Slack worker crash/restart-safe.
+model EmailTask {
+  id           String    @id @default(cuid())
+  siteId       String
+  dashboardUid String
+  intervalMin  Int // preset minutes between sends
+  durationMin  Int // preset minutes, mirrors MonitorTask.durationMin
+  status       String    @default("active") // active | stopped | expired
+  createdById  String
+  startedAt    DateTime  @default(now())
+  expiresAt    DateTime
+  nextSendAt   DateTime // worker reads this to know what's due
+  lastSentAt   DateTime?
+
+  site       Site              @relation(fields: [siteId], references: [id])
+  createdBy  User              @relation(fields: [createdById], references: [id])
+  metrics    EmailTaskMetric[]
+  recipients EmailRecipient[]
+  sendEvents EmailSendEvent[]
+
+  @@index([status, nextSendAt])
+}
+
+// Which panels' current values go into the report — same idea as
+// TaskMetric, but no threshold/operator since a report just states values,
+// it doesn't alert on them.
+model EmailTaskMetric {
+  id          String  @id @default(cuid())
+  emailTaskId String
+  panelId     Int
+  panelTitle  String
+  // Optional, informational only — no cooldown/threading/alerting like
+  // TaskMetric. Set these if you want the report to annotate "over/under
+  // threshold" next to a value; leave both null for a plain value report.
+  operator    String?
+  threshold   Float?
+
+  emailTask EmailTask @relation(fields: [emailTaskId], references: [id])
+
+  @@index([emailTaskId])
+}
+
+model EmailRecipient {
+  id          String @id @default(cuid())
+  emailTaskId String
+  email       String
+  kind        String // "to" | "cc"
+
+  emailTask EmailTask @relation(fields: [emailTaskId], references: [id])
+
+  @@index([emailTaskId])
+}
+
+model EmailSendEvent {
+  id             String   @id @default(cuid())
+  emailTaskId    String
+  sentAt         DateTime @default(now())
+  success        Boolean
+  errorMessage   String?
+  recipientCount Int
+
+  emailTask EmailTask @relation(fields: [emailTaskId], references: [id])
+
+  @@index([emailTaskId, sentAt])
+}
+
+// ---------- Insights (reporting/analytics) ----------
+// Entirely additive — none of the above models had columns changed or
+// removed. Populated by a background aggregation tick in worker/index.ts,
+// never computed live from raw TaskEvent rows on a page request. See
+// context.md "Insights" for the full rationale.
+
+// One row per breach lifecycle for one metric — a breached=false→true
+// transition in TaskEvent opens one of these, breached=true→false closes
+// it. This is what makes "how many breaches, how long, when" a fast
+// indexed query instead of a full TaskEvent scan every time a report loads.
+model BreachIncident {
+  id           String    @id @default(cuid())
+  metricId     String
+  startedAt    DateTime // checkedAt of the TaskEvent that opened this incident
+  endedAt      DateTime? // checkedAt of the TaskEvent that closed it; null = still ongoing
+  durationSec  Int? // set once closed
+  maxValue     Float? // highest capturedValue observed while breached
+  alerted      Boolean   @default(false) // true if any event in this incident had alerted=true
+  // Anchors into TaskEvent — not relations (TaskEvent isn't deleted, but
+  // this keeps aggregation reprocessing simple/idempotent without a FK
+  // dependency the aggregator would need to keep in lockstep).
+  startEventId String
+  endEventId   String?
+
+  metric TaskMetric @relation(fields: [metricId], references: [id])
+
+  @@index([metricId, startedAt])
+  @@index([metricId, endedAt])
+}
+
+// One row per metric per UTC calendar day — the pre-aggregated layer every
+// Insights query actually reads from. "Last 30 days" sums ~30 rows per
+// metric instead of scanning thousands of TaskEvents.
+model DailyMetricStat {
+  id               String   @id @default(cuid())
+  metricId         String
+  date             DateTime // truncated to UTC midnight
+  monitoredSeconds Int      @default(0) // healthySeconds + breachedSeconds
+  healthySeconds   Int      @default(0)
+  breachedSeconds  Int      @default(0)
+  breachCount      Int      @default(0) // incidents that started this day
+  checkCount       Int      @default(0)
+  errorCount       Int      @default(0)
+
+  metric TaskMetric @relation(fields: [metricId], references: [id])
+
+  @@unique([metricId, date])
+  @@index([date])
+}
+
+// Single-row checkpoint (id is always the literal "singleton") so the
+// aggregation tick only ever processes TaskEvents newer than the last run —
+// never a full-table rescan. Advanced only after a batch's transaction
+// commits, so a crash mid-batch is safe to retry.
+model ReportingCheckpoint {
+  id                   String    @id @default("singleton")
+  lastProcessedEventId String?
+  lastProcessedAt      DateTime?
+  updatedAt            DateTime  @updatedAt
+}
+
+// Peak-period definition for "peak period breach analysis" reporting.
+// siteId null = the global default; a site-specific row overrides it.
+// Deliberately minimal for v1 — no per-customer concept yet since nothing
+// in the current schema models a "customer" above Site.
+model PeakPeriodConfig {
+  id         String   @id @default(cuid())
+  siteId     String? // null = global default
+  startHour  Int // 0-23, local peak start (inclusive)
+  endHour    Int // 0-23, local peak end (exclusive)
+  daysOfWeek String // comma-separated 0(Sun)-6(Sat), e.g. "1,2,3,4,5"
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  site Site? @relation(fields: [siteId], references: [id])
+
+  @@index([siteId])
 }
