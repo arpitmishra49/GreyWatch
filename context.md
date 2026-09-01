@@ -24,7 +24,7 @@ frank log of what broke during the build and how it was fixed.
 The pilot (one site, username+Slack-ID login, single-panel-per-task Slack
 alerts) became a real internal platform:
 
-- **Real auth**: a shared `CAN Engineer` username+password login, with the
+- **Real auth**: a shared `CAC Engineer` username+password login, with the
   `User` model built to support individual users/roles later without
   another migration.
 - **31 real sites**, each an independent Grafana "instance" (today they all
@@ -265,8 +265,8 @@ cookie for every route except `/login` and the login API, redirecting to
 check** — edge middleware can't query SQLite, so every protected page still
 calls `getCurrentUser()` (a real DB lookup) itself.
 
-The shared `CAN Engineer` account is seeded from `CAN_ENGINEER_USERNAME`/
-`CAN_ENGINEER_PASSWORD` env vars (`prisma/seed.ts`) — never hardcoded,
+The shared `CAC Engineer` account is seeded from `CAC_ENGINEER_USERNAME`/
+`CAC_ENGINEER_PASSWORD` env vars (`prisma/seed.ts`) — never hardcoded,
 never in frontend code. Adding individual users later is just adding more
 `User` rows with their own credentials; nothing about the schema or login
 flow assumes there's only one account.
@@ -402,8 +402,8 @@ DATABASE_URL="file:./dev.db"
 PORT=3000
 
 # Auth — read once at seed time, never at runtime
-CAN_ENGINEER_USERNAME=
-CAN_ENGINEER_PASSWORD=
+CAC_ENGINEER_USERNAME=
+CAC_ENGINEER_PASSWORD=
 
 # Email — optional, defaults to a placeholder; only matters once a real
 # provider (which usually validates the From domain) replaces Ethereal

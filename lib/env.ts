@@ -21,12 +21,12 @@ const appSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
 });
 
-// The shared "CAN Engineer" account's credentials — never hardcoded, and
+// The shared "CAC Engineer" account's credentials — never hardcoded, and
 // never in frontend code. Read once by prisma/seed.ts to create/update the
 // account; the app itself only ever compares against the stored hash.
 const authSchema = z.object({
-  CAN_ENGINEER_USERNAME: z.string().min(1, "CAN_ENGINEER_USERNAME is required"),
-  CAN_ENGINEER_PASSWORD: z.string().min(8, "CAN_ENGINEER_PASSWORD must be at least 8 characters"),
+  CAC_ENGINEER_USERNAME: z.string().min(1, "CAC_ENGINEER_USERNAME is required"),
+  CAC_ENGINEER_PASSWORD: z.string().min(8, "CAC_ENGINEER_PASSWORD must be at least 8 characters"),
 });
 
 function load<T extends z.ZodTypeAny>(schema: T, label: string): z.infer<T> {

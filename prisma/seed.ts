@@ -28,14 +28,14 @@ async function seedSites() {
   console.log(`Seeded ${INITIAL_SITE_NAMES.length} sites.`);
 }
 
-async function seedCanEngineer() {
-  const passwordHash = await hashPassword(authEnv.CAN_ENGINEER_PASSWORD);
+async function seedCacEngineer() {
+  const passwordHash = await hashPassword(authEnv.CAC_ENGINEER_PASSWORD);
   await prisma.user.upsert({
-    where: { username: authEnv.CAN_ENGINEER_USERNAME },
+    where: { username: authEnv.CAC_ENGINEER_USERNAME },
     update: { passwordHash },
-    create: { username: authEnv.CAN_ENGINEER_USERNAME, passwordHash, role: "engineer" },
+    create: { username: authEnv.CAC_ENGINEER_USERNAME, passwordHash, role: "engineer" },
   });
-  console.log(`Seeded shared account "${authEnv.CAN_ENGINEER_USERNAME}".`);
+  console.log(`Seeded shared account "${authEnv.CAC_ENGINEER_USERNAME}".`);
 }
 
 // Global default peak-period window for Insights reporting — 9am-6pm on
@@ -53,7 +53,7 @@ async function seedPeakPeriodDefault() {
 
 async function main() {
   await seedSites();
-  await seedCanEngineer();
+  await seedCacEngineer();
   await seedPeakPeriodDefault();
 }
 

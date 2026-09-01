@@ -23,7 +23,7 @@ rewritten without a specific reason tied to the new requirements.
 
 ## 3. Authentication implementation
 
-Shared `CAN Engineer` username+password login. Passwords hashed with
+Shared `CAC Engineer` username+password login. Passwords hashed with
 Node's built-in `crypto.scrypt` (no new dependency). Session is still a
 simple httpOnly cookie holding `user.id`. New root `middleware.ts` adds
 centralized route protection (edge-safe presence check; pages still do

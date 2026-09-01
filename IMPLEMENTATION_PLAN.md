@@ -11,7 +11,7 @@ list dedupes to **31 unique sites**, and sandbox email uses **Ethereal**
 ## Phase 1 — Authentication and User model
 
 **Goal**: Replace username+Slack-ID login with a real username+password
-login for a shared `CAN Engineer` account, while keeping the User model
+login for a shared `CAC Engineer` account, while keeping the User model
 ready for individual users later.
 
 **Database changes**: `User` gains `passwordHash String`, `role String
@@ -24,8 +24,8 @@ same as the earlier multi-metric migration.
 `crypto` — no new dependency). `lib/auth.ts` updated: `verifyLogin(username,
 password)`, session cookie unchanged in shape (still just `user.id`).
 `app/api/auth/login/route.ts` validates username+password instead of
-username+Slack-ID. `prisma/seed.ts` upserts the `CAN Engineer` account from
-`CAN_ENGINEER_USERNAME`/`CAN_ENGINEER_PASSWORD` env vars (never hardcoded).
+username+Slack-ID. `prisma/seed.ts` upserts the `CAC Engineer` account from
+`CAC_ENGINEER_USERNAME`/`CAC_ENGINEER_PASSWORD` env vars (never hardcoded).
 
 **Frontend changes**: `app/login/page.tsx` — password field instead of
 Slack member ID field.
@@ -40,7 +40,7 @@ too, but shouldn't need to be the only line of defense).
 
 **Tests**: valid login succeeds, invalid password/username rejected,
 visiting a protected route while logged out redirects to `/login`, logout
-clears the session, `CAN Engineer` seed is idempotent.
+clears the session, `CAC Engineer` seed is idempotent.
 
 **Definition of Done**: `tsc`/`eslint`/`build` clean; live login test
 (correct + incorrect credentials) against the running dev server.
